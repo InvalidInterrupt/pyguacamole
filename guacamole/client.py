@@ -4,9 +4,11 @@ The MIT License (MIT)
 Copyright (c)   2014 rescale
                 2014 - 2016 Mohab Usama
 """
-
+import abc
 import socket
 import logging
+
+import six
 
 from guacamole import logger as guac_logger
 
@@ -23,7 +25,8 @@ PROTOCOL_NAME = 'guacamole'
 BUF_LEN = 4096
 
 
-class GuacamoleClient(object):
+@six.add_metaclass(abc.ABCMeta)
+class BaseGuacamoleClient(object):
     """Guacamole Client class."""
 
     def __init__(self, host, port, timeout=20, debug=False, logger=None):
@@ -62,36 +65,20 @@ class GuacamoleClient(object):
             self.logger.setLevel(logging.DEBUG)
 
     @property
-    def client(self):
-        """
-        Socket connection.
-        """
-        if not self._client:
-            self._client = socket.create_connection(
-                (self.host, self.port), self.timeout)
-            self.logger.info('Client connected with guacd server (%s, %s, %s)'
-                             % (self.host, self.port, self.timeout))
-
-        return self._client
-
-    @property
     def id(self):
         """Return client id"""
         return self._id
 
+    @abc.abstractmethod
     def close(self):
-        """
-        Terminate connection with Guacamole guacd server.
-        """
-        self.client.close()
-        self._client = None
         self.connected = False
         self.logger.info('Connection closed.')
 
+    @abc.abstractmethod
     def receive(self):
-        """
-        Receive instructions from Guacamole guacd server.
-        """
+        pass
+
+    def _decode_instruction(self):
         start = 0
 
         while True:
@@ -101,25 +88,23 @@ class GuacamoleClient(object):
                 line = self._buffer[:idx + 1].decode()
                 self._buffer = self._buffer[idx + 1:]
                 self.logger.debug('Received instruction: %s' % line)
-                return line
+                yield line
+                return
             else:
                 start = len(self._buffer)
                 # we are still waiting for instruction termination
-                buf = self.client.recv(BUF_LEN)
+                buf = yield
                 if not buf:
                     # No data recieved, connection lost?!
                     self.close()
                     self.logger.warn(
                         'Failed to receive instruction. Closing.')
-                    return None
+                    return
                 self._buffer.extend(buf)
 
+    @abc.abstractmethod
     def send(self, data):
-        """
-        Send encoded instructions to Guacamole guacd server.
-        """
         self.logger.debug('Sending data: %s' % data)
-        self.client.sendall(data.encode())
 
     def read_instruction(self):
         """
@@ -228,3 +213,66 @@ class GuacamoleClient(object):
 
         self.logger.debug('Handshake completed.')
         self.connected = True
+
+
+class GuacamoleClient(BaseGuacamoleClient):
+    """Guacamole Client class."""
+
+    def __init__(self, host, port, timeout=20, debug=False, logger=None):
+        """
+        Guacamole Client class. This class can handle communication with guacd
+        server.
+
+        :param host: guacd server host.
+
+        :param port: guacd server port.
+
+        :param timeout: socket connection timeout.
+
+        :param debug: if True, default logger will switch to Debug level.
+        """
+        self._client = None
+        super(GuacamoleClient, self).__init__(host, port, timeout, debug, logger)
+
+    @property
+    def client(self):
+        """
+        Socket connection.
+        """
+        if not self._client:
+            self._client = socket.create_connection(
+                (self.host, self.port), self.timeout)
+            self.logger.info('Client connected with guacd server (%s, %s, %s)'
+                             % (self.host, self.port, self.timeout))
+
+        return self._client
+
+    def close(self):
+        """
+        Terminate connection with Guacamole guacd server.
+        """
+        self.client.close()
+        self._client = None
+        super(GuacamoleClient, self).close()
+
+    def receive(self):
+        """
+        Receive instructions from Guacamole guacd server.
+        """
+
+        instruction_generator = self._decode_instruction()
+        instruction = next(instruction_generator, None)
+
+        while not instruction:
+            try:
+                instruction = instruction_generator.send(self.client.recv(BUF_LEN))
+            except StopIteration:
+                return None
+        return instruction
+
+    def send(self, data):
+        """
+        Send encoded instructions to Guacamole guacd server.
+        """
+        super(GuacamoleClient, self).send(data)
+        self.client.sendall(data.encode())
