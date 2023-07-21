@@ -25,8 +25,8 @@ class AsyncGuacamoleClient(BaseGuacamoleClient):
         super(AsyncGuacamoleClient, self).__init__(host, port, timeout, debug, logger)
 
     async def _connect(self):
-        self._stream_reader, self._stream_writer = await asyncio.open_connection(
-            self.host, self.port, timeout=self.timeout
+        self._stream_reader, self._stream_writer = await asyncio.wait_for(
+            asyncio.open_connection(self.host, self.port), timeout=self.timeout
         )
         self.logger.info('Client connected with guacd server (%s, %s, %s)'
                          % (self.host, self.port, self.timeout))
