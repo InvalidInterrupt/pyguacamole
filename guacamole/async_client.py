@@ -1,6 +1,7 @@
 import asyncio
 
 from guacamole.client import BUF_LEN, BaseGuacamoleClient
+from guacamole.instruction import GuacamoleInstruction as Instruction
 
 
 class AsyncGuacamoleClient(BaseGuacamoleClient):
@@ -56,6 +57,7 @@ class AsyncGuacamoleClient(BaseGuacamoleClient):
             try:
                 instruction = instruction_generator.send(await reader.read(BUF_LEN))
             except StopIteration:
+                await self.close()
                 return None
         return instruction
 
@@ -64,4 +66,48 @@ class AsyncGuacamoleClient(BaseGuacamoleClient):
         writer = await self._get_stream_writer()
         writer.write(data)
         await writer.drain()
+
+    async def read_instruction(self):
+        """
+        Read and decode instruction.
+        """
+        super(AsyncGuacamoleClient, self).read_instruction()
+        return Instruction.load(await self.receive())
+
+    async def send_instruction(self, instruction):
+        """
+        Send instruction after encoding.
+        """
+        super(AsyncGuacamoleClient, self).send_instruction(instruction)
+        return await self.send(instruction.encode())
+
+    async def handshake(self, protocol='vnc', width=1024, height=768, dpi=96,
+                  audio=None, video=None, image=None,
+                  width_override=None,
+                  height_override=None, dpi_override=None, **kwargs):
+        handshake_generator = self._handshake_generator(
+            protocol=protocol,
+            width=width,
+            height=height,
+            dpi=dpi,
+            audio=audio,
+            video=video,
+            image=image,
+            width_override=width_override,
+            height_override=height_override,
+            dpi_override=dpi_override,
+            **kwargs,
+        )
+        instructions = next(handshake_generator)
+        while True:
+            try:
+                if instructions is None:
+                    await self.close()
+                    return
+                for instruction in instructions:
+                    await self.send_instruction(instruction)
+                response = await self.read_instruction()
+                instructions = handshake_generator.send(response)
+            except StopIteration:
+                break
 
