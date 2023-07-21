@@ -79,7 +79,7 @@ class AsyncGuacamoleClient(BaseGuacamoleClient):
         Send instruction after encoding.
         """
         super(AsyncGuacamoleClient, self).send_instruction(instruction)
-        return await self.send(instruction.encode())
+        return await self.send(instruction.encode().encode("utf8"))
 
     async def handshake(self, protocol='vnc', width=1024, height=768, dpi=96,
                   audio=None, video=None, image=None,
