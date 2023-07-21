@@ -96,7 +96,6 @@ class BaseGuacamoleClient(object):
                 buf = yield
                 if not buf:
                     # No data recieved, connection lost?!
-                    self.close()
                     self.logger.warn(
                         'Failed to receive instruction. Closing.')
                     return
@@ -106,21 +105,21 @@ class BaseGuacamoleClient(object):
     def send(self, data):
         self.logger.debug('Sending data: %s' % data)
 
+    @abc.abstractmethod
     def read_instruction(self):
         """
         Read and decode instruction.
         """
         self.logger.debug('Reading instruction.')
-        return Instruction.load(self.receive())
 
+    @abc.abstractmethod
     def send_instruction(self, instruction):
         """
         Send instruction after encoding.
         """
         self.logger.debug('Sending instruction: %s' % str(instruction))
-        return self.send(instruction.encode())
 
-    def handshake(self, protocol='vnc', width=1024, height=768, dpi=96,
+    def _handshake_generator(self, protocol='vnc', width=1024, height=768, dpi=96,
                   audio=None, video=None, image=None, width_override=None,
                   height_override=None, dpi_override=None, **kwargs):
         """
@@ -147,40 +146,41 @@ class BaseGuacamoleClient(object):
 
         # if connectionid is provided - connect to existing connectionid
         if 'connectionid' in kwargs:
-            self.send_instruction(Instruction('select',
-                                              kwargs.get('connectionid')))
+            next_instruction = Instruction('select', kwargs.get('connectionid'))
         else:
-            self.send_instruction(Instruction('select', protocol))
+            next_instruction = Instruction('select', protocol)
+
+        response_instruction = yield [next_instruction]
 
         # 2. Receive `args` instruction
-        instruction = self.read_instruction()
         self.logger.debug('Expecting `args` instruction, received: %s'
-                          % str(instruction))
+                          % str(response_instruction))
 
-        if not instruction:
-            self.close()
+        if not response_instruction:
+            yield None
             raise GuacamoleError(
                 'Cannot establish Handshake. Connection Lost!')
 
-        if instruction.opcode != 'args':
-            self.close()
+        if response_instruction.opcode != 'args':
+            yield None
             raise GuacamoleError(
                 'Cannot establish Handshake. Expected opcode `args`, '
-                'received `%s` instead.' % instruction.opcode)
+                'received `%s` instead.' % response_instruction.opcode)
 
         # 3. Respond with size, audio & video support
+        next_instructions = []
         self.logger.debug('Send `size` instruction (%s, %s, %s)'
                           % (width, height, dpi))
-        self.send_instruction(Instruction('size', width, height, dpi))
+        next_instructions.append(Instruction('size', width, height, dpi))
 
         self.logger.debug('Send `audio` instruction (%s)' % audio)
-        self.send_instruction(Instruction('audio', *audio))
+        next_instructions.append(Instruction('audio', *audio))
 
         self.logger.debug('Send `video` instruction (%s)' % video)
-        self.send_instruction(Instruction('video', *video))
+        next_instructions.append(Instruction('video', *video))
 
         self.logger.debug('Send `image` instruction (%s)' % image)
-        self.send_instruction(Instruction('image', *image))
+        next_instructions.append(Instruction('image', *image))
 
         if width_override:
             kwargs["width"] = width_override
@@ -191,28 +191,39 @@ class BaseGuacamoleClient(object):
 
         # 4. Send `connect` instruction with proper values
         connection_args = [
-            kwargs.get(arg.replace('-', '_'), '') for arg in instruction.args
+            kwargs.get(arg.replace('-', '_'), '') for arg in response_instruction.args
         ]
 
         self.logger.debug('Send `connect` instruction (%s)' % connection_args)
-        self.send_instruction(Instruction('connect', *connection_args))
+        next_instructions.append(Instruction('connect', *connection_args))
 
         # 5. Receive ``ready`` instruction, with client ID.
-        instruction = self.read_instruction()
+        response_instruction = yield next_instructions
         self.logger.debug('Expecting `ready` instruction, received: %s'
-                          % str(instruction))
+                          % str(response_instruction))
 
-        if instruction.opcode != 'ready':
+        if response_instruction.opcode != 'ready':
             self.logger.warning(
                 'Expected `ready` instruction, received: %s instead')
 
-        if instruction.args:
-            self._id = instruction.args[0]
+        if response_instruction.args:
+            self._id = response_instruction.args[0]
             self.logger.debug(
                 'Established connection with client id: %s' % self.id)
 
         self.logger.debug('Handshake completed.')
         self.connected = True
+
+    @abc.abstractmethod
+    def handshake(self, protocol='vnc', width=1024, height=768, dpi=96,
+                                 audio=None, video=None, image=None,
+                                 width_override=None,
+                                 height_override=None, dpi_override=None, **kwargs):
+        """
+        Establish connection with Guacamole guacd server via handshake.
+
+        """
+        pass
 
 
 class GuacamoleClient(BaseGuacamoleClient):
@@ -267,6 +278,7 @@ class GuacamoleClient(BaseGuacamoleClient):
             try:
                 instruction = instruction_generator.send(self.client.recv(BUF_LEN))
             except StopIteration:
+                self.close()
                 return None
         return instruction
 
@@ -276,3 +288,47 @@ class GuacamoleClient(BaseGuacamoleClient):
         """
         super(GuacamoleClient, self).send(data)
         self.client.sendall(data.encode())
+
+    def read_instruction(self):
+        """
+        Read and decode instruction.
+        """
+        super(GuacamoleClient, self).read_instruction()
+        return Instruction.load(self.receive())
+
+    def send_instruction(self, instruction):
+        """
+        Send instruction after encoding.
+        """
+        super(GuacamoleClient, self).send_instruction(instruction)
+        return self.send(instruction.encode())
+
+    def handshake(self, protocol='vnc', width=1024, height=768, dpi=96,
+                                 audio=None, video=None, image=None,
+                                 width_override=None,
+                                 height_override=None, dpi_override=None, **kwargs):
+        handshake_generator = self._handshake_generator(
+            protocol=protocol,
+            width=width,
+            height=height,
+            dpi=dpi,
+            audio=audio,
+            video=video,
+            image=image,
+            width_override=width_override,
+            height_override=height_override,
+            dpi_override=dpi_override,
+            **kwargs,
+        )
+        instructions = next(handshake_generator)
+        while True:
+            try:
+                if instructions is None:
+                    self.close()
+                    return
+                for instruction in instructions:
+                    self.send_instruction(instruction)
+                response = self.read_instruction()
+                instructions = handshake_generator.send(response)
+            except StopIteration:
+                break
